@@ -44,9 +44,11 @@ export default function SDRExplorer() {
   const [volume, setVolume] = useState(70);
   const [mode, setMode] = useState('WFM');
   const [signalStrength, setSignalStrength] = useState(-50);
-  const [serverIP, setServerIP] = useState('192.168.1.100');
-  const [serverPort, setServerPort] = useState(1234);
+  const [serverIP, setServerIP] = useState('127.0.0.1');
+  const [serverPort, setServerPort] = useState(8090);
   const [showSettings, setShowSettings] = useState(false);
+  const [simulationMode, setSimulationMode] = useState(false);
+  const [stationPositions, setStationPositions] = useState<number[]>([]);
   
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number>();
@@ -68,61 +70,67 @@ export default function SDRExplorer() {
   };
 
   const connectToServer = useCallback(() => {
+    console.log('Connecting to:', serverIP, serverPort);
+    
     if (wsRef.current) {
       wsRef.current.close();
     }
 
     const ws = new WebSocket(`ws://${serverIP}:${serverPort}`);
-    
-    ws.binaryType = 'arraybuffer';
+    wsRef.current = ws;
     
     ws.onopen = () => {
-      console.log('Connected to RTL-SDR server');
+      console.log('Connected!');
       setIsConnected(true);
-      sendCommand(1, centerFreq);
-      sendCommand(2, bandwidth);
     };
-
-    ws.onmessage = (event) => {
-      if (event.data instanceof ArrayBuffer) {
-        processSamples(new Uint8Array(event.data));
+    
+    ws.onmessage = async (event) => {
+      try {
+        let buffer;
+        if (event.data instanceof ArrayBuffer) {
+          buffer = new Uint8Array(event.data);
+        } else if (event.data instanceof Blob) {
+          buffer = new Uint8Array(await event.data.arrayBuffer());
+        } else {
+          return;
+        }
+        processSamples(buffer);
+      } catch (e) {
+        console.error('Error processing:', e);
       }
     };
-
+    
     ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      setIsConnected(false);
+      console.error('Error:', error);
     };
-
+    
     ws.onclose = () => {
-      console.log('Disconnected from server');
+      console.log('Disconnected');
       setIsConnected(false);
     };
-
-    wsRef.current = ws;
-
-    function sendCommand(cmd: number, param: number) {
-      const buffer = new ArrayBuffer(9);
-      const view = new DataView(buffer);
-      view.setUint8(0, cmd);
-      view.setFloat64(1, param);
-      ws.send(buffer);
-    }
-  }, [serverIP, serverPort, centerFreq, bandwidth]);
+  }, [serverIP, serverPort]);
 
   const processSamples = useCallback((samples: Uint8Array) => {
-    const n = samples.length / 2;
+    const fftSize = fftBufferRef.current.length;
+    const step = Math.floor(samples.length / 2 / fftSize);
     let maxSignal = -100;
+    let sampleCount = 0;
     
-    for (let i = 0; i < n; i++) {
-      const re = (samples[i * 2] - 127) / 128;
-      const im = (samples[i * 2 + 1] - 127) / 128;
-      const mag = 20 * Math.log10(Math.sqrt(re * re + im * im) + 0.001);
-      fftBufferRef.current[i] = mag;
-      if (mag > maxSignal) maxSignal = mag;
+    for (let i = 0; i < fftSize; i++) {
+      const idx = i * step * 2;
+      if (idx + 1 < samples.length) {
+        const re = (samples[idx] - 127) / 128;
+        const im = (samples[idx + 1] - 127) / 128;
+        const mag = 20 * Math.log10(Math.sqrt(re * re + im * im) + 0.001);
+        fftBufferRef.current[i] = mag;
+        if (mag > maxSignal) maxSignal = mag;
+        sampleCount++;
+      }
     }
     
-    setSignalStrength(Math.round(maxSignal));
+    if (sampleCount > 0) {
+      setSignalStrength(Math.round(maxSignal));
+    }
     
     if (isPlaying && audioContextRef.current) {
       const queue = audioQueueRef.current;
@@ -140,53 +148,89 @@ export default function SDRExplorer() {
     }
   }, [isPlaying]);
 
+  const generateSimulatedSignal = useCallback(() => {
+    const positions = [];
+    const numStations = Math.floor(Math.random() * 5) + 2;
+    for (let i = 0; i < numStations; i++) {
+      positions.push(Math.random());
+    }
+    setStationPositions(positions);
+    
+    for (let i = 0; i < 1024; i++) {
+      const pos = i / 1024;
+      let signal = Math.random() * 0.15;
+      
+      for (const stationPos of positions) {
+        const dist = Math.abs(pos - stationPos);
+        if (dist < 0.02) {
+          signal += (1 - dist / 0.02) * (0.5 + Math.random() * 0.4);
+        }
+      }
+      
+      signal += Math.sin(pos * 50 + Date.now() / 1000) * 0.05;
+      
+      fftBufferRef.current[i] = 20 * Math.log10(Math.max(0.001, signal)) + 80;
+    }
+    
+    const maxSignal = Math.max.apply(null, Array.from(fftBufferRef.current));
+    setSignalStrength(Math.round(maxSignal));
+  }, []);
+
   const drawWaterfall = useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas) {
+      console.log('No canvas');
+      return;
+    }
+    
+    if (canvas.width === 0 || canvas.height === 0) {
+      console.log('Canvas has no size:', canvas.width, canvas.height);
+      return;
+    }
     
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const imageData = ctx.createImageData(canvas.width, canvas.height);
-    const data = imageData.data;
-
-    for (let y = 0; y < canvas.height - 1; y++) {
-      for (let x = 0; x < canvas.width; x++) {
-        const i = (y * canvas.width + x) * 4;
-        const nextI = ((y + 1) * canvas.width + x) * 4;
-        data[i] = data[nextI];
-        data[i + 1] = data[nextI + 1];
-        data[i + 2] = data[nextI + 2];
-        data[i + 3] = 255;
-      }
+    if (!ctx) {
+      console.log('No ctx');
+      return;
     }
 
-    const bottomY = canvas.height - 1;
-    const binWidth = canvas.width / 1024;
-    
-    for (let x = 0; x < canvas.width; x++) {
-      const binIdx = Math.floor(x / binWidth);
-      const signal = Math.max(0, Math.min(1, (fftBufferRef.current[binIdx] + 80) / 80));
-      
-      const i = (bottomY * canvas.width + x) * 4;
-      
-      if (signal > 0.1) {
-        const intensity = signal;
-        data[i] = Math.floor(intensity * 255);
-        data[i + 1] = Math.floor(intensity * 200);
-        data[i + 2] = Math.floor(intensity * 50);
-      } else {
-        data[i] = 0;
-        data[i + 1] = Math.floor(signal * 10);
-        data[i + 2] = Math.floor(signal * 20);
-      }
-      data[i + 3] = 255;
+    // Generate signal if in simulation mode
+    if (simulationMode) {
+      generateSimulatedSignal();
     }
 
+    // Check signal values (debug)
+    const firstFew = Array.from(fftBufferRef.current.slice(0, 10));
+    const buffer = Array.from(fftBufferRef.current);
+    const maxVal = Math.max(...buffer);
+    const minVal = Math.min(...buffer);
+
+    // Scroll waterfall up (faster, more natural scrolling)
+    const scrollHeight = 2;
+    const imageData = ctx.getImageData(0, scrollHeight, canvas.width, canvas.height - scrollHeight);
     ctx.putImageData(imageData, 0, 0);
 
+    // Draw new line at bottom
+    const bottomY = canvas.height - scrollHeight;
+    const binCount = fftBufferRef.current.length;
+    const binWidth = canvas.width / binCount;
+    
+    for (let x = 0; x < canvas.width; x++) {
+      const binIdx = Math.min(Math.floor(x / binWidth), binCount - 1);
+      const signal = fftBufferRef.current[binIdx] || -100;
+      const normalized = Math.max(0, Math.min(1, (signal + 80) / 80));
+      
+      if (normalized > 0.1) {
+        ctx.fillStyle = `rgb(${Math.floor(normalized * 255)}, ${Math.floor(normalized * 200)}, 0)`;
+      } else {
+        const blue = Math.floor(30 + normalized * 50);
+        ctx.fillStyle = `rgb(0, ${Math.floor(normalized * 30)}, ${blue})`;
+      }
+      ctx.fillRect(x, bottomY, 1, scrollHeight);
+    }
+
     animationRef.current = requestAnimationFrame(drawWaterfall);
-  }, []);
+  }, [simulationMode, generateSimulatedSignal]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -569,8 +613,34 @@ export default function SDRExplorer() {
               {isConnected ? 'Reconnect' : 'Connect'}
             </button>
             
+            <div style={{ marginTop: 20, paddingTop: 20, borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+              <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 12 }}>
+                Or try Simulation Mode to see how the app works:
+              </p>
+              <button
+                onClick={() => {
+                  setSimulationMode(!simulationMode);
+                  setIsConnected(!simulationMode);
+                  setShowSettings(false);
+                }}
+                style={{
+                  width: '100%',
+                  padding: 14,
+                  background: simulationMode ? 'rgba(0, 255, 136, 0.2)' : 'var(--bg-card)',
+                  border: `2px solid ${simulationMode ? 'var(--accent)' : 'rgba(255,255,255,0.2)'}`,
+                  borderRadius: 12,
+                  color: simulationMode ? 'var(--accent)' : 'white',
+                  fontSize: 15,
+                  fontWeight: 600,
+                  cursor: 'pointer'
+                }}
+              >
+                {simulationMode ? '✓ Simulation Mode ON' : 'Enable Simulation Mode'}
+              </button>
+            </div>
+            
             <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 12, textAlign: 'center' }}>
-              Make sure rtl_tcp is running before connecting
+              {simulationMode ? 'Running with simulated signals' : 'Make sure rtl_tcp is running before connecting'}
             </p>
           </div>
         </div>
