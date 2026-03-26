@@ -148,71 +148,46 @@ export default function SDRExplorer() {
     }
   }, [isPlaying]);
 
-  const generateSimulatedSignal = useCallback(() => {
-    const positions = [];
-    const numStations = Math.floor(Math.random() * 5) + 2;
-    for (let i = 0; i < numStations; i++) {
-      positions.push(Math.random());
-    }
-    setStationPositions(positions);
-    
-    for (let i = 0; i < 1024; i++) {
-      const pos = i / 1024;
-      let signal = Math.random() * 0.15;
-      
-      for (const stationPos of positions) {
-        const dist = Math.abs(pos - stationPos);
-        if (dist < 0.02) {
-          signal += (1 - dist / 0.02) * (0.5 + Math.random() * 0.4);
-        }
+  const drawWaterfall = useCallback((ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement) => {
+    if (simulationMode) {
+      const positions = [];
+      const numStations = Math.floor(Math.random() * 5) + 2;
+      for (let i = 0; i < numStations; i++) {
+        positions.push(Math.random());
       }
       
-      signal += Math.sin(pos * 50 + Date.now() / 1000) * 0.05;
+      for (let i = 0; i < 1024; i++) {
+        const pos = i / 1024;
+        let signal = Math.random() * 0.15;
+        
+        for (const stationPos of positions) {
+          const dist = Math.abs(pos - stationPos);
+          if (dist < 0.02) {
+            signal += (1 - dist / 0.02) * (0.5 + Math.random() * 0.4);
+          }
+        }
+        
+        signal += Math.sin(pos * 50 + Date.now() / 1000) * 0.05;
+        fftBufferRef.current[i] = 20 * Math.log10(Math.max(0.001, signal)) + 80;
+      }
       
-      fftBufferRef.current[i] = 20 * Math.log10(Math.max(0.001, signal)) + 80;
-    }
-    
-    const maxSignal = Math.max.apply(null, Array.from(fftBufferRef.current));
-    setSignalStrength(Math.round(maxSignal));
-  }, []);
-
-  const drawWaterfall = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) {
-      console.log('No canvas');
-      return;
-    }
-    
-    if (canvas.width === 0 || canvas.height === 0) {
-      console.log('Canvas has no size:', canvas.width, canvas.height);
-      return;
-    }
-    
-    const ctx = canvas.getContext('2d');
-    if (!ctx) {
-      console.log('No ctx');
-      return;
+      const signalMax = Math.max(...Array.from(fftBufferRef.current));
+      setSignalStrength(Math.round(signalMax));
     }
 
-    // Generate signal if in simulation mode
-    if (simulationMode) {
-      generateSimulatedSignal();
-    }
+    if (canvas.width === 0 || canvas.height === 0) return;
 
-    // Check signal values (debug)
-    const firstFew = Array.from(fftBufferRef.current.slice(0, 10));
-    const buffer = Array.from(fftBufferRef.current);
-    const maxVal = Math.max(...buffer);
-    const minVal = Math.min(...buffer);
-
-    // Scroll waterfall up (faster, more natural scrolling)
     const scrollHeight = 2;
-    const imageData = ctx.getImageData(0, scrollHeight, canvas.width, canvas.height - scrollHeight);
-    ctx.putImageData(imageData, 0, 0);
+    try {
+      const imageData = ctx.getImageData(0, scrollHeight, canvas.width, canvas.height - scrollHeight);
+      ctx.putImageData(imageData, 0, 0);
+    } catch (e) {
+      ctx.fillStyle = '#001020';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
 
-    // Draw new line at bottom
     const bottomY = canvas.height - scrollHeight;
-    const binCount = fftBufferRef.current.length;
+    const binCount = 1024;
     const binWidth = canvas.width / binCount;
     
     for (let x = 0; x < canvas.width; x++) {
@@ -223,44 +198,39 @@ export default function SDRExplorer() {
       if (normalized > 0.1) {
         ctx.fillStyle = `rgb(${Math.floor(normalized * 255)}, ${Math.floor(normalized * 200)}, 0)`;
       } else {
-        const blue = Math.floor(30 + normalized * 50);
-        ctx.fillStyle = `rgb(0, ${Math.floor(normalized * 30)}, ${blue})`;
+        ctx.fillStyle = `rgb(0, ${Math.floor(normalized * 30)}, ${Math.floor(30 + normalized * 50)})`;
       }
       ctx.fillRect(x, bottomY, 1, scrollHeight);
     }
-
-    animationRef.current = requestAnimationFrame(drawWaterfall);
-  }, [simulationMode, generateSimulatedSignal]);
+  }, [simulationMode]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
     const resizeCanvas = () => {
       const rect = canvas.getBoundingClientRect();
-      const width = Math.max(100, rect.width * 2);
-      const height = Math.max(100, rect.height * 2);
-      if (canvas.width !== width || canvas.height !== height) {
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.fillStyle = '#000';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-        }
-      }
+      canvas.width = Math.floor(rect.width);
+      canvas.height = Math.floor(rect.height);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
     };
 
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
 
-    const animationId = requestAnimationFrame(function loop() {
-      drawWaterfall();
-    });
+    const loop = () => {
+      drawWaterfall(ctx, canvas);
+      requestAnimationFrame(loop);
+    };
+    const animId = requestAnimationFrame(loop);
 
     return () => {
       window.removeEventListener('resize', resizeCanvas);
-      cancelAnimationFrame(animationId);
+      cancelAnimationFrame(animId);
     };
   }, [drawWaterfall]);
 
