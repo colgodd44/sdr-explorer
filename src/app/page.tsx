@@ -3,55 +3,62 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
 const FREQUENCY_BANDS = [
-  { name: 'AM Broadcast', min: 530, max: 1700, unit: 'kHz', color: '#ff4466' },
-  { name: 'Shortwave', min: 3000, max: 30000, unit: 'kHz', color: '#ffcc00' },
-  { name: 'CB Radio', min: 26000, max: 28000, unit: 'kHz', color: '#ff9900' },
-  { name: 'Airband', min: 118000, max: 137000, unit: 'kHz', color: '#00aaff' },
-  { name: 'VHF TV', min: 174000, max: 216000, unit: 'kHz', color: '#aa66ff' },
-  { name: 'FM Broadcast', min: 88000000, max: 108000000, unit: 'Hz', color: '#00ff88' },
-  { name: 'Airband', min: 118000000, max: 137000000, unit: 'Hz', color: '#00aaff' },
-  { name: 'Weather', min: 162400000, max: 162550000, unit: 'Hz', color: '#ffcc00' },
-  { name: 'Family Radio', min: 462500000, max: 467500000, unit: 'Hz', color: '#ff6688' },
-  { name: 'Ham 2m', min: 144000000, max: 148000000, unit: 'Hz', color: '#66ff66' },
-  { name: 'Ham 70cm', min: 420000000, max: 450000000, unit: 'Hz', color: '#66ffff' },
-  { name: 'ISM Band', min: 2400000000, max: 2500000000, unit: 'Hz', color: '#ff66ff' },
+  { name: 'AM Broadcast', min: 530000, max: 1700000, display: '0.53-1.7 MHz', color: '#ff4466' },
+  { name: 'Shortwave', min: 3000000, max: 30000000, display: '3-30 MHz', color: '#ffcc00' },
+  { name: 'CB Radio', min: 26000000, max: 28000000, display: '26-28 MHz', color: '#ff9900' },
+  { name: 'Airband', min: 118000000, max: 137000000, display: '118-137 MHz', color: '#00aaff' },
+  { name: 'VHF TV', min: 174000000, max: 216000000, display: '174-216 MHz', color: '#aa66ff' },
+  { name: 'FM Broadcast', min: 88000000, max: 108000000, display: '88-108 MHz', color: '#00ff88' },
+  { name: 'Weather Sat', min: 137000000, max: 138000000, display: '137-138 MHz', color: '#ffcc00' },
+  { name: 'NOAA Weather', min: 162400000, max: 162550000, display: '162.4-162.55 MHz', color: '#ff6600' },
+  { name: 'Family Radio', min: 462500000, max: 467500000, display: '462-467 MHz', color: '#ff6688' },
+  { name: 'Ham 2m', min: 144000000, max: 148000000, display: '144-148 MHz', color: '#66ff66' },
+  { name: 'Ham 70cm', min: 420000000, max: 450000000, display: '420-450 MHz', color: '#66ffff' },
+  { name: 'ISM 2.4GHz', min: 2400000000, max: 2500000000, display: '2.4-2.5 GHz', color: '#ff66ff' },
 ];
 
 const BAND_PRESETS = [
+  { name: 'FM', band: FREQUENCY_BANDS[5] },
   { name: 'AM', band: FREQUENCY_BANDS[0] },
   { name: 'SW', band: FREQUENCY_BANDS[1] },
   { name: 'AIR', band: FREQUENCY_BANDS[3] },
-  { name: 'FM', band: FREQUENCY_BANDS[5] },
   { name: 'WX', band: FREQUENCY_BANDS[7] },
-  { name: 'FRS', band: FREQUENCY_BANDS[8] },
+  { name: 'HAM', band: FREQUENCY_BANDS[9] },
 ];
 
 const SIGNAL_TYPES = [
+  { mode: 'WFM', desc: 'Wide FM (Broadcast)' },
+  { mode: 'NFM', desc: 'Narrow FM' },
   { mode: 'AM', desc: 'Amplitude Modulation' },
-  { mode: 'FM', desc: 'Frequency Modulation' },
   { mode: 'USB', desc: 'Upper Sideband' },
   { mode: 'LSB', desc: 'Lower Sideband' },
-  { mode: 'CW', desc: 'Continuous Wave' },
+  { mode: 'CW', desc: 'CW/Digital' },
 ];
 
 export default function SDRExplorer() {
-  const [centerFreq, setCenterFreq] = useState(100000000);
-  const [bandwidth, setBandwidth] = useState(5000000);
+  const [centerFreq, setCenterFreq] = useState(102500000);
+  const [bandwidth, setBandwidth] = useState(2400000);
   const [selectedBand, setSelectedBand] = useState(FREQUENCY_BANDS[5]);
+  const [isConnected, setIsConnected] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolume] = useState(70);
-  const [mode, setMode] = useState('FM');
-  const [signalStrength, setSignalStrength] = useState(45);
+  const [mode, setMode] = useState('WFM');
+  const [signalStrength, setSignalStrength] = useState(-50);
+  const [serverIP, setServerIP] = useState('192.168.1.100');
+  const [serverPort, setServerPort] = useState(1234);
+  const [showSettings, setShowSettings] = useState(false);
   
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number>();
   const audioContextRef = useRef<AudioContext | null>(null);
-  const oscillatorRef = useRef<OscillatorNode | null>(null);
   const gainRef = useRef<GainNode | null>(null);
-
+  const wsRef = useRef<WebSocket | null>(null);
+  const audioQueueRef = useRef<Int8Array[]>([]);
+  const fftBufferRef = useRef<Float32Array>(new Float32Array(1024));
+  
   const formatFrequency = (freq: number): string => {
     if (freq >= 1000000000) {
-      return `${(freq / 1000000000).toFixed(3)} GHz`;
+      return `${(freq / 1000000000).toFixed(4)} GHz`;
     } else if (freq >= 1000000) {
       return `${(freq / 1000000).toFixed(3)} MHz`;
     } else if (freq >= 1000) {
@@ -60,32 +67,78 @@ export default function SDRExplorer() {
     return `${freq} Hz`;
   };
 
-  const generateSignal = useCallback((freq: number): number => {
-    const bandStart = centerFreq - bandwidth / 2;
-    const normalizedPos = (freq - bandStart) / bandwidth;
+  const connectToServer = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+
+    const ws = new WebSocket(`ws://${serverIP}:${serverPort}`);
     
-    let signal = Math.random() * 0.1;
+    ws.binaryType = 'arraybuffer';
     
-    const carrierPos = Math.random();
-    if (carrierPos > 0.85) {
-      const carrierFreq = bandStart + Math.random() * bandwidth;
-      const distFromCarrier = Math.abs(normalizedPos - (carrierFreq - bandStart) / bandwidth);
-      signal += Math.exp(-distFromCarrier * 20) * (0.3 + Math.random() * 0.5);
+    ws.onopen = () => {
+      console.log('Connected to RTL-SDR server');
+      setIsConnected(true);
+      sendCommand(1, centerFreq);
+      sendCommand(2, bandwidth);
+    };
+
+    ws.onmessage = (event) => {
+      if (event.data instanceof ArrayBuffer) {
+        processSamples(new Uint8Array(event.data));
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      setIsConnected(false);
+    };
+
+    ws.onclose = () => {
+      console.log('Disconnected from server');
+      setIsConnected(false);
+    };
+
+    wsRef.current = ws;
+
+    function sendCommand(cmd: number, param: number) {
+      const buffer = new ArrayBuffer(9);
+      const view = new DataView(buffer);
+      view.setUint8(0, cmd);
+      view.setFloat64(1, param);
+      ws.send(buffer);
+    }
+  }, [serverIP, serverPort, centerFreq, bandwidth]);
+
+  const processSamples = useCallback((samples: Uint8Array) => {
+    const n = samples.length / 2;
+    let maxSignal = -100;
+    
+    for (let i = 0; i < n; i++) {
+      const re = (samples[i * 2] - 127) / 128;
+      const im = (samples[i * 2 + 1] - 127) / 128;
+      const mag = 20 * Math.log10(Math.sqrt(re * re + im * im) + 0.001);
+      fftBufferRef.current[i] = mag;
+      if (mag > maxSignal) maxSignal = mag;
     }
     
-    for (let i = 0; i < 3; i++) {
-      const randomFreq = Math.random();
-      const dist = Math.abs(normalizedPos - randomFreq);
-      signal += Math.exp(-dist * 30) * 0.2;
-    }
+    setSignalStrength(Math.round(maxSignal));
     
-    if (Math.random() > 0.98) {
-      const dist = Math.abs(normalizedPos - 0.5);
-      signal += Math.exp(-dist * 10) * 0.6;
+    if (isPlaying && audioContextRef.current) {
+      const queue = audioQueueRef.current;
+      queue.push(new Int8Array(samples));
+      if (queue.length > 5) queue.shift();
+      
+      if (queue.length >= 2) {
+        const combined = new Int8Array(queue[0].length * 2);
+        for (let i = 0; i < queue[0].length; i++) {
+          combined[i * 2] = queue[0][i * 2] || 0;
+          combined[i * 2 + 1] = queue[0][i * 2 + 1] || 0;
+        }
+        queue.shift();
+      }
     }
-    
-    return Math.min(1, Math.max(0, signal));
-  }, [centerFreq, bandwidth]);
+  }, [isPlaying]);
 
   const drawWaterfall = useCallback(() => {
     const canvas = canvasRef.current;
@@ -109,26 +162,23 @@ export default function SDRExplorer() {
     }
 
     const bottomY = canvas.height - 1;
+    const binWidth = canvas.width / 1024;
+    
     for (let x = 0; x < canvas.width; x++) {
-      const freq = centerFreq - bandwidth / 2 + (x / canvas.width) * bandwidth;
-      const signal = generateSignal(freq);
+      const binIdx = Math.floor(x / binWidth);
+      const signal = Math.max(0, Math.min(1, (fftBufferRef.current[binIdx] + 80) / 80));
+      
       const i = (bottomY * canvas.width + x) * 4;
       
-      const hue = 120 + (1 - signal) * 120;
-      const sat = signal * 100;
-      const light = 10 + signal * 50;
-      
       if (signal > 0.1) {
-        const r = signal > 0.5 ? 255 : signal * 2 * 255;
-        const g = signal > 0.7 ? 255 : signal > 0.3 ? (signal - 0.3) * 500 : signal * 2 * 255;
-        const b = signal < 0.3 ? 255 : signal < 0.5 ? (0.5 - signal) * 500 : signal * 255;
-        data[i] = Math.min(255, r + Math.random() * 50);
-        data[i + 1] = Math.min(255, g + Math.random() * 50);
-        data[i + 2] = Math.min(255, b + Math.random() * 50);
+        const intensity = signal;
+        data[i] = Math.floor(intensity * 255);
+        data[i + 1] = Math.floor(intensity * 200);
+        data[i + 2] = Math.floor(intensity * 50);
       } else {
         data[i] = 0;
-        data[i + 1] = Math.floor(signal * 20);
-        data[i + 2] = Math.floor(signal * 30);
+        data[i + 1] = Math.floor(signal * 10);
+        data[i + 2] = Math.floor(signal * 20);
       }
       data[i + 3] = 255;
     }
@@ -136,7 +186,7 @@ export default function SDRExplorer() {
     ctx.putImageData(imageData, 0, 0);
 
     animationRef.current = requestAnimationFrame(drawWaterfall);
-  }, [centerFreq, bandwidth, generateSignal]);
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -144,12 +194,8 @@ export default function SDRExplorer() {
 
     const resizeCanvas = () => {
       const rect = canvas.getBoundingClientRect();
-      canvas.width = rect.width * window.devicePixelRatio;
-      canvas.height = rect.height * window.devicePixelRatio;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
-      }
+      canvas.width = rect.width * 2;
+      canvas.height = rect.height * 2;
     };
 
     resizeCanvas();
@@ -167,10 +213,12 @@ export default function SDRExplorer() {
 
   useEffect(() => {
     const interval = setInterval(() => {
-      setSignalStrength(40 + Math.random() * 30);
-    }, 500);
+      if (!isConnected) {
+        setSignalStrength(-50 + Math.random() * 10);
+      }
+    }, 200);
     return () => clearInterval(interval);
-  }, []);
+  }, [isConnected]);
 
   const toggleAudio = () => {
     if (isPlaying) {
@@ -183,18 +231,9 @@ export default function SDRExplorer() {
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       audioContextRef.current = audioContext;
       
-      const oscillator = audioContext.createOscillator();
       const gainNode = audioContext.createGain();
-      
-      oscillator.type = 'sine' as OscillatorType;
-      oscillator.frequency.value = 1000;
-      gainNode.gain.value = volume / 100 * 0.3;
-      
-      oscillator.connect(gainNode);
+      gainNode.gain.value = volume / 100 * 0.5;
       gainNode.connect(audioContext.destination);
-      
-      oscillator.start();
-      oscillatorRef.current = oscillator;
       gainRef.current = gainNode;
       
       setIsPlaying(true);
@@ -203,14 +242,23 @@ export default function SDRExplorer() {
 
   useEffect(() => {
     if (gainRef.current) {
-      gainRef.current.gain.value = isPlaying ? volume / 100 * 0.3 : 0;
+      gainRef.current.gain.value = isPlaying ? volume / 100 * 0.5 : 0;
     }
   }, [volume, isPlaying]);
 
   const selectBand = (band: typeof FREQUENCY_BANDS[0]) => {
     setSelectedBand(band);
-    setCenterFreq((band.min + band.max) / 2);
+    const newCenter = (band.min + band.max) / 2;
+    setCenterFreq(newCenter);
     setBandwidth((band.max - band.min) * 0.8);
+    
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      const buffer = new ArrayBuffer(9);
+      const view = new DataView(buffer);
+      view.setUint8(0, 1);
+      view.setFloat64(1, newCenter);
+      wsRef.current.send(buffer);
+    }
   };
 
   const adjustFrequency = (delta: number) => {
@@ -220,6 +268,13 @@ export default function SDRExplorer() {
     
     if (newFreq >= bandStart && newFreq <= bandEnd) {
       setCenterFreq(newFreq);
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        const buffer = new ArrayBuffer(9);
+        const view = new DataView(buffer);
+        view.setUint8(0, 1);
+        view.setFloat64(1, newFreq);
+        wsRef.current.send(buffer);
+      }
     }
   };
 
@@ -227,9 +282,20 @@ export default function SDRExplorer() {
     <div className="app">
       <div className="header">
         <div className="logo">SDR <span>Explorer</span></div>
-        <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-          v1.0
-        </div>
+        <button 
+          onClick={() => setShowSettings(true)}
+          style={{
+            background: 'rgba(255,255,255,0.1)',
+            border: 'none',
+            color: 'white',
+            padding: '8px 16px',
+            borderRadius: 8,
+            cursor: 'pointer',
+            fontSize: 13
+          }}
+        >
+          ⚙️ Settings
+        </button>
       </div>
 
       <div className="content">
@@ -254,44 +320,20 @@ export default function SDRExplorer() {
             Frequency Controls
           </div>
           <div className="freq-controls">
-            <button 
-              className="freq-btn"
-              onClick={() => adjustFrequency(-bandwidth * 0.1)}
-              style={{ fontSize: 20 }}
-            >
-              ◀◀
-              <span className="freq-btn-label">-10%</span>
+            <button className="freq-btn" onClick={() => adjustFrequency(-bandwidth * 0.1)}>
+              ◀◀<span className="freq-btn-label">-10%</span>
             </button>
-            <button 
-              className="freq-btn"
-              onClick={() => adjustFrequency(-bandwidth * 0.01)}
-              style={{ fontSize: 20 }}
-            >
-              ◀
-              <span className="freq-btn-label">-1%</span>
+            <button className="freq-btn" onClick={() => adjustFrequency(-bandwidth * 0.01)}>
+              ◀<span className="freq-btn-label">-1%</span>
             </button>
-            <button 
-              className="freq-btn"
-              onClick={() => setCenterFreq((selectedBand.min + selectedBand.max) / 2)}
-            >
-              ⬤
-              <span className="freq-btn-label">Center</span>
+            <button className="freq-btn" onClick={() => setCenterFreq((selectedBand.min + selectedBand.max) / 2)}>
+              ⬤<span className="freq-btn-label">Center</span>
             </button>
-            <button 
-              className="freq-btn"
-              onClick={() => adjustFrequency(bandwidth * 0.01)}
-              style={{ fontSize: 20 }}
-            >
-              ▶
-              <span className="freq-btn-label">+1%</span>
+            <button className="freq-btn" onClick={() => adjustFrequency(bandwidth * 0.01)}>
+              ▶<span className="freq-btn-label">+1%</span>
             </button>
-            <button 
-              className="freq-btn"
-              onClick={() => adjustFrequency(bandwidth * 0.1)}
-              style={{ fontSize: 20 }}
-            >
-              ▶▶
-              <span className="freq-btn-label">+10%</span>
+            <button className="freq-btn" onClick={() => adjustFrequency(bandwidth * 0.1)}>
+              ▶▶<span className="freq-btn-label">+10%</span>
             </button>
           </div>
         </div>
@@ -308,7 +350,7 @@ export default function SDRExplorer() {
                 onClick={() => selectBand(preset.band)}
               >
                 <div className="band-btn-name">{preset.name}</div>
-                <div className="band-btn-range">{preset.band.name}</div>
+                <div className="band-btn-range">{preset.band.display}</div>
               </button>
             ))}
           </div>
@@ -318,21 +360,20 @@ export default function SDRExplorer() {
           <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
             All Frequency Bands
           </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 8 }}>
             {FREQUENCY_BANDS.map((band) => (
               <button
                 key={band.name}
                 className={`band-btn ${selectedBand.name === band.name ? 'active' : ''}`}
                 onClick={() => selectBand(band)}
                 style={{ 
-                  flexBasis: 'calc(33% - 6px)',
                   background: selectedBand.name === band.name ? `${band.color}22` : undefined,
                   borderColor: selectedBand.name === band.name ? band.color : undefined,
                   color: selectedBand.name === band.name ? band.color : undefined,
                 }}
               >
                 <div className="band-btn-name">{band.name}</div>
-                <div className="band-btn-range">{band.min / 1000 >= 1000 ? `${band.min / 1000000}MHz` : `${band.min / 1000}kHz`}</div>
+                <div className="band-btn-range">{band.display}</div>
               </button>
             ))}
           </div>
@@ -386,16 +427,16 @@ export default function SDRExplorer() {
           </div>
           <div className="meter-display">
             <div className="meter">
-              <div className="meter-value">{signalStrength.toFixed(0)}</div>
+              <div className="meter-value">{signalStrength}</div>
               <div className="meter-label">Signal (dB)</div>
             </div>
             <div className="meter">
-              <div className="meter-value" style={{ color: 'var(--accent-blue)' }}>0</div>
-              <div className="meter-label">SNR (dB)</div>
+              <div className="meter-value" style={{ color: 'var(--accent-blue)' }}>{bandwidth / 1000000}</div>
+              <div className="meter-label">BW (MHz)</div>
             </div>
             <div className="meter">
-              <div className="meter-value" style={{ color: 'var(--accent-yellow)' }}>{(bandwidth / 1000000).toFixed(1)}</div>
-              <div className="meter-label">BW (MHz)</div>
+              <div className="meter-value" style={{ color: 'var(--accent-yellow)' }}>0</div>
+              <div className="meter-label">S/N Ratio</div>
             </div>
           </div>
         </div>
@@ -403,8 +444,8 @@ export default function SDRExplorer() {
 
       <div className="status-bar">
         <div className="status-item">
-          <div className="status-dot" />
-          <span>SDR Connected</span>
+          <div className={`status-dot ${isConnected ? '' : 'offline'}`} />
+          <span>{isConnected ? 'RTL-SDR Connected' : 'Not Connected'}</span>
         </div>
         <div className="status-item">
           <div className="signal-strength">
@@ -414,16 +455,126 @@ export default function SDRExplorer() {
                 className="signal-bar" 
                 style={{ 
                   height: h,
-                  opacity: signalStrength > i * 20 ? 1 : 0.3 
+                  opacity: signalStrength > -80 + i * 15 ? 1 : 0.3 
                 }} 
               />
             ))}
           </div>
         </div>
         <div className="status-item">
-          <span>CPU: {(20 + Math.random() * 10).toFixed(0)}%</span>
+          <span>Gain: Auto</span>
         </div>
       </div>
+
+      {showSettings && (
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          background: 'rgba(0,0,0,0.9)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000,
+          padding: 20
+        }} onClick={() => setShowSettings(false)}>
+          <div style={{
+            background: 'var(--bg-secondary)',
+            borderRadius: 20,
+            padding: 24,
+            maxWidth: 400,
+            width: '100%'
+          }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+              <h3 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>RTL-SDR Connection</h3>
+              <button 
+                onClick={() => setShowSettings(false)}
+                style={{ background: 'transparent', border: 'none', color: 'white', fontSize: 24, cursor: 'pointer' }}
+              >
+                ×
+              </button>
+            </div>
+            
+            <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 16 }}>
+              To connect to your RTL-SDR dongle, run this command on your computer:
+            </p>
+            
+            <div style={{
+              background: 'var(--bg-card)',
+              padding: 12,
+              borderRadius: 8,
+              fontFamily: 'monospace',
+              fontSize: 12,
+              marginBottom: 16,
+              wordBreak: 'break-all'
+            }}>
+              rtl_tcp -a 0.0.0.0 -p 1234
+            </div>
+            
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, display: 'block' }}>
+                Server IP Address
+              </label>
+              <input
+                type="text"
+                value={serverIP}
+                onChange={(e) => setServerIP(e.target.value)}
+                placeholder="192.168.1.100"
+                style={{
+                  width: '100%',
+                  padding: 12,
+                  background: 'var(--bg-card)',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  borderRadius: 8,
+                  color: 'white',
+                  fontSize: 14
+                }}
+              />
+            </div>
+            
+            <div style={{ marginBottom: 20 }}>
+              <label style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, display: 'block' }}>
+                Port
+              </label>
+              <input
+                type="number"
+                value={serverPort}
+                onChange={(e) => setServerPort(Number(e.target.value))}
+                placeholder="1234"
+                style={{
+                  width: '100%',
+                  padding: 12,
+                  background: 'var(--bg-card)',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  borderRadius: 8,
+                  color: 'white',
+                  fontSize: 14
+                }}
+              />
+            </div>
+            
+            <button
+              onClick={connectToServer}
+              style={{
+                width: '100%',
+                padding: 14,
+                background: 'linear-gradient(135deg, var(--accent), #00cc6a)',
+                border: 'none',
+                borderRadius: 12,
+                color: 'black',
+                fontSize: 15,
+                fontWeight: 600,
+                cursor: 'pointer'
+              }}
+            >
+              {isConnected ? 'Reconnect' : 'Connect'}
+            </button>
+            
+            <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 12, textAlign: 'center' }}>
+              Make sure rtl_tcp is running before connecting
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
