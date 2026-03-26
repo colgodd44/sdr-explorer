@@ -47,7 +47,7 @@ export default function SDRExplorer() {
   const [serverIP, setServerIP] = useState('127.0.0.1');
   const [serverPort, setServerPort] = useState(8090);
   const [showSettings, setShowSettings] = useState(false);
-  const [simulationMode, setSimulationMode] = useState(false);
+  const [simulationMode, setSimulationMode] = useState(true);
   const [stationPositions, setStationPositions] = useState<number[]>([]);
   
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -624,12 +624,14 @@ export default function SDRExplorer() {
             
             <div style={{ marginTop: 20, paddingTop: 20, borderTop: '1px solid rgba(255,255,255,0.1)' }}>
               <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 12 }}>
-                Or try Simulation Mode to see how the app works:
+                Simulation Mode shows demo signals when no RTL-SDR is connected:
               </p>
               <button
                 onClick={() => {
                   setSimulationMode(!simulationMode);
-                  setIsConnected(!simulationMode);
+                  if (!simulationMode) {
+                    setIsConnected(true);
+                  }
                   setShowSettings(false);
                 }}
                 style={{
